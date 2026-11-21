@@ -13,7 +13,7 @@ namespace SurapolSQL
     internal static class Ui
     {
         public const string AppName = "SurapolManagementDB Demo";
-        public const string AppVersion = "1.0.0";
+        public const string AppVersion = "1.1.0";
 
         private static string? _dataDir;
 
@@ -26,6 +26,9 @@ namespace SurapolSQL
             get
             {
                 if (_dataDir != null) return _dataDir;
+                // กำหนดโฟลเดอร์เองได้ (ใช้ตอนทดสอบ / ใช้แบบพกพา):  SURAPOL_DATA_DIR = โฟลเดอร์
+                string? env = Environment.GetEnvironmentVariable("SURAPOL_DATA_DIR");
+                if (!string.IsNullOrEmpty(env)) return _dataDir = env;
                 string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 string dir = System.IO.Path.Combine(root, AppName);
                 return _dataDir = dir;

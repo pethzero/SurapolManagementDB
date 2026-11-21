@@ -8,7 +8,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>SurapolManagementDB-Demo</AssemblyName>
     <RootNamespace>SurapolSQL</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Product>SurapolManagementDB Demo</Product>
     <Description>MySQL / MariaDB client (demo): connect, SQL editor, browse table data</Description>
     <ApplicationIcon>app.ico</ApplicationIcon>

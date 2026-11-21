@@ -17,7 +17,10 @@ namespace SurapolSQL
     /// </summary>
     public sealed partial class DbForm : Form
     {
-        const int PageSize = 200;
+        /// <summary>จำนวนแถวต่อหน้า (เลือกได้ที่ท้ายหน้าข้อมูล จำไว้)</summary>
+        static readonly int[] PageSizes = { 50, 100, 200, 500, 1000, 5000 };
+        int _pageSize = int.TryParse(Ui.GetSetting("page_size"), out int ps) && Array.IndexOf(PageSizes, ps) >= 0 ? ps : 200;
+        ComboBox _cmbPage = null!;
         bool _inited, _embedded;
         readonly SplitContainer _split;
 
@@ -134,6 +137,15 @@ namespace SurapolSQL
         readonly TableLayoutPanel _listPage, _card;
         readonly FlowLayoutPanel _actions;
         readonly ListView _lv;
+        /// <summary>ค้นหาในรายการ (ชื่อตาราง / ฐานข้อมูล) ของหน้านี้</summary>
+        readonly TextBox _lvFind;
+
+        // ปุ่มไอคอน (วาดไอคอนใหม่เมื่อเปลี่ยนธีม)
+        readonly List<(Button Btn, string Glyph)> _iconBtns = new List<(Button, string)>();
+        readonly ToolTip _btnTip = new ToolTip();
+        /// <summary>โหมดดูข้อมูลแบบข้อความ (Text) แทนตาราง (Grid) — ใช้ทั้งหน้าตารางและผลลัพธ์ SQL</summary>
+        bool _textMode = Ui.GetSetting("text_mode") == "1";
+        readonly List<(Button Btn, bool Text)> _modeBtns = new List<(Button, bool)>();
 
         // หน้า: ตารางผลลัพธ์ (System Info / Session / สิทธิ์ผู้ใช้)
         readonly TableLayoutPanel _gridPage;
@@ -149,6 +161,8 @@ namespace SurapolSQL
         readonly Control[] _tabPanels = new Control[3];
         readonly DataGridView _grid, _gridCols;
         readonly TextBox _txtDdl, _txtWhere;
+        /// <summary>ข้อมูลหน้านี้แบบข้อความ (โหมด Text)</summary>
+        readonly TextBox _txtData;
         readonly Label _lblPage, _lblData;
         readonly Button _btnPrev, _btnNext;
         readonly ToolStripStatusLabel _status;
@@ -285,6 +299,21 @@ namespace SurapolSQL
             _lv.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) OpenListItem(); };
             _lv.MouseUp += (s, e) => { if (e.Button == MouseButtons.Right) ShowListMenu(e.Location); };
             _lv.ColumnClick += (s, e) => SortList(e.Column);
+            _lvFind = new TextBox { Width = Ui.Px(this, 260), Margin = new Padding(0, 2, 10, 2) };
+            _lvFind.TextChanged += (s, e) => FilterList();
+            _lvFind.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Escape) { _lvFind.Clear(); e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Down && _lv.Items.Count > 0) { _lv.Focus(); _lv.Items[0].Selected = _lv.Items[0].Focused = true; e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Enter && _lv.Items.Count > 0)
+                {
+                    e.SuppressKeyPress = true;
+                    _lv.SelectedItems.Clear();
+                    _lv.Items[0].Selected = true;
+                    OpenListItem();
+                }
+            };
+            _btnTip.SetToolTip(_lvFind, Tr.T("พิมพ์บางส่วนของชื่อ (หรือคำอธิบาย)\nEnter = เปิดรายการแรก   ↓ = ไปที่รายการ   Esc = ล้าง", "Type part of a name (or comment)\nEnter = open the first item   ↓ = go to the list   Esc = clear"));
             _listPage.Controls.Add(_card, 0, 0);
             _listPage.Controls.Add(_actions, 0, 1);
             _listPage.Controls.Add(_lv, 0, 2);
@@ -326,24 +355,69 @@ namespace SurapolSQL
             }
             var tabHost = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
 
-            var dl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+            // ---- หน้าข้อมูล (แบบ DBeaver):  หัว = ช่องกรองยาวเต็มแถว · ตัว = Grid / Text (+ แถบโหมดด้านซ้าย) · ท้าย = ปุ่ม + สถานะ
+            var dl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0) };
             dl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             dl.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             dl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             dl.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            var bar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Margin = new Padding(0, 0, 0, 6) };
-            bar.Controls.Add(new Label { Text = "WHERE", AutoSize = true, Margin = new Padding(0, 7, 4, 0), Tag = "muted" });
-            _txtWhere = new TextBox { Width = Ui.Px(this, 260), Margin = new Padding(0, 3, 4, 3), PlaceholderText = "name LIKE '%abc%'" };
-            _txtWhere.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _ = ApplyFilter(); } };
-            new ToolTip().SetToolTip(_txtWhere, Tr.T("เงื่อนไขแบบ SQL เช่น  name LIKE '%สม%' AND id > 10   แล้วกด Enter", "SQL condition, e.g.  name LIKE '%abc%' AND id > 10   then press Enter"));
-            bar.Controls.Add(_txtWhere);
-            bar.Controls.Add(Btn(Tr.T("กรอง", "Filter"), () => _ = ApplyFilter()));
-            _btnPrev = Btn("◀", () => _ = Page(-1));
-            _lblPage = new Label { AutoSize = true, Margin = new Padding(2, 7, 2, 0) };
-            _btnNext = Btn("▶", () => _ = Page(1));
-            bar.Controls.AddRange(new Control[] { Sep(), _btnPrev, _lblPage, _btnNext, Sep() });
-            bar.Controls.Add(Btn(Tr.T("รีเฟรช", "Refresh"), () => _ = ReloadPage(true)));
-            dl.Controls.Add(bar, 0, 0);
+
+            // หัว: ช่องกรอง WHERE
+            var head = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4, Margin = new Padding(0, 0, 0, 6) };
+            head.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            head.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            head.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            head.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            _txtWhere = new TextBox
+            {
+                Dock = DockStyle.Fill, Margin = new Padding(0, 3, 4, 3),
+                PlaceholderText = Tr.T("พิมพ์เงื่อนไขแบบ SQL เพื่อกรองข้อมูล เช่น  name LIKE '%สม%' AND id > 10   แล้วกด Enter", "Enter a SQL expression to filter results, e.g.  name LIKE '%abc%' AND id > 10   then press Enter"),
+            };
+            _txtWhere.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _ = ApplyFilter(); }
+                else if (e.KeyCode == Keys.Escape && _txtWhere.Text != "") { e.SuppressKeyPress = true; ClearFilter(); }
+            };
+            head.Controls.Add(new Label { Text = "WHERE", AutoSize = true, Anchor = AnchorStyles.Left, Tag = "muted", Margin = new Padding(2, 0, 6, 0) }, 0, 0);
+            head.Controls.Add(_txtWhere, 1, 0);
+            head.Controls.Add(IconBtn("", Tr.T("กรองข้อมูล (Enter)", "Apply the filter (Enter)"), () => _ = ApplyFilter(), "", Tr.T("กรอง", "Filter")), 2, 0);
+            head.Controls.Add(IconBtn("", Tr.T("ล้างตัวกรอง (Esc)", "Clear the filter (Esc)"), ClearFilter), 3, 0);
+            dl.Controls.Add(head, 0, 0);
+
+            // ท้าย: ปุ่ม (ซ้าย) + สถานะ (ขวา)
+            var foot = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 6, 0, 0) };
+            foot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            foot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            // แถวเดียว (ไม่ขึ้นบรรทัดใหม่ — FlowLayoutPanel ที่ wrap ในแถว AutoSize จะจองความสูงเกิน)
+            var fb = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0) };
+            fb.Controls.Add(IconBtn("", Tr.T("รีเฟรช — โหลดข้อมูลใหม่ (F5)", "Refresh — reload the data (F5)"), () => _ = ReloadPage(true)));
+            var btnFirst = IconBtn("", Tr.T("หน้าแรก", "First page"), () => _ = Page(-1_000_000));
+            _btnPrev = IconBtn("", Tr.T("หน้าก่อน", "Previous page"), () => _ = Page(-1));
+            _lblPage = new Label { AutoSize = true, Margin = new Padding(2, 7, 6, 0) };
+            _btnNext = IconBtn("", Tr.T("หน้าถัดไป", "Next page"), () => _ = Page(1));
+            fb.Controls.AddRange(new Control[] { btnFirst, _btnPrev, _lblPage, _btnNext, Sep() });
+            fb.Controls.Add(new Label { Text = Tr.T("แถว/หน้า", "Rows"), AutoSize = true, Margin = new Padding(0, 7, 4, 0), Tag = "muted" });
+            _cmbPage = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = Ui.Px(this, 72), Margin = new Padding(0, 3, 0, 3) };
+            foreach (int n in PageSizes) _cmbPage.Items.Add(n.ToString("N0"));
+            _cmbPage.SelectedIndex = Math.Max(0, Array.IndexOf(PageSizes, _pageSize));
+            _cmbPage.SelectedIndexChanged += async (s, e) =>
+            {
+                int n = PageSizes[Math.Max(0, _cmbPage.SelectedIndex)];
+                if (n == _pageSize) return;
+                if (_dt != null && !await OkToLeave()) { _cmbPage.SelectedIndex = Array.IndexOf(PageSizes, _pageSize); return; }
+                _pageSize = n;
+                Ui.SetSetting("page_size", n.ToString());
+                _offset = 0;
+                if (_dt != null) await ReloadPage(false);
+            };
+            fb.Controls.Add(_cmbPage);
+            var gear = IconBtn("", Tr.T("ตั้งค่าตาราง (ดับเบิลคลิกที่ช่อง ฯลฯ)", "Grid settings (double-click behaviour …)"), () => { });
+            gear.Margin = new Padding(8, 1, 0, 1);
+            gear.Click += (s, e) => ShowGridSettings(gear);
+            fb.Controls.Add(gear);
+            _lblData = new Label { AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, AutoEllipsis = true, Margin = new Padding(8, 0, 0, 0), Tag = "keep" };
+            foot.Controls.Add(fb, 0, 0);
+            foot.Controls.Add(_lblData, 1, 0);
             _grid = new DataGridView
             {
                 Dock = DockStyle.Fill, AllowUserToAddRows = false, AllowUserToResizeRows = false, RowHeadersWidth = Ui.Px(this, 28),
@@ -354,10 +428,25 @@ namespace SurapolSQL
             _grid.DefaultCellStyle.NullValue = "NULL";
             _grid.DefaultCellStyle.DataSourceNullValue = DBNull.Value;
             _grid.CellFormatting += OnCellFormatting;
-            _grid.ColumnHeaderMouseClick += (s, e) => _ = SortBy(e.ColumnIndex);
+            // หัวคอลัมน์: คลิกซ้าย = เรียง, ลากไปวาง = สลับลำดับ (เฉพาะการแสดง), คลิกขวา = เมนูคอลัมน์
+            _grid.AllowUserToOrderColumns = true;
+            _grid.ColumnHeaderMouseClick += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left) _ = SortBy(e.ColumnIndex);
+                else if (e.Button == MouseButtons.Right) ShowHeaderMenu(e.ColumnIndex);
+            };
+            _grid.ColumnDisplayIndexChanged += (s, e) => { if (_textMode && !_binding) RefreshTextView(); };
             _grid.DataError += (s, e) => { e.ThrowException = false; SetStatus("✖ " + e.Exception?.Message); };
             _grid.CellValueChanged += (s, e) => UpdateDirty();
             _grid.UserDeletedRow += (s, e) => UpdateDirty();
+            // ค่าที่แก้ในช่องจะค้างอยู่ใน "โหมดแก้ไขแถว" จนกว่าจะเลื่อนไปแถวอื่น → จบการแก้ไขทันทีที่ออกจากช่อง (ปุ่มบันทึกขึ้นเลย)
+            _grid.CellEndEdit += (s, e) => BeginInvoke((Action)(() => { FlushEdits(); UpdateDirty(); }));
+            _grid.CellPainting += (s, e) =>
+            {
+                if (e.RowIndex != -1 || e.ColumnIndex < 0 || e.ColumnIndex >= _cols.Count) return;
+                var cm = _cols[e.ColumnIndex];
+                PaintTypedHeader(_grid, e, cm.Name, cm.ColumnType, cm.Key == "PRI");
+            };
             _grid.CellMouseDown += (s, e) =>
             {
                 if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && e.ColumnIndex >= 0 && !_grid[e.ColumnIndex, e.RowIndex].Selected)
@@ -366,16 +455,71 @@ namespace SurapolSQL
                     _grid.CurrentCell = _grid[e.ColumnIndex, e.RowIndex];
                 }
             };
-            _grid.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0 && e.ColumnIndex >= 0 && IsBlobCol(e.ColumnIndex)) _ = OpenBlob(e.RowIndex, e.ColumnIndex); };
+            // ดับเบิลคลิก: ช่อง BLOB = เปิดดูไฟล์ / รูป,  ช่องอื่น / หัวแถว = หน้าต่างแก้ไข (ดู) ทีละแถว
+            // ดับเบิลคลิก:  หัวแถว (ช่องซ้ายสุด) = หน้าต่างแก้ทั้งแถวเสมอ (ชี้ช่องที่เลือกอยู่ในแถวนั้น)
+            //               ช่อง BLOB = เปิดดูไฟล์ / รูป
+            //               ช่องอื่น = แก้ในช่อง (ค่าเริ่มต้น) หรือเปิดหน้าต่าง ตามที่ตั้งไว้ (⚙ ท้ายตาราง)
+            _grid.CellDoubleClick += (s, e) => GridDoubleClick(e.RowIndex, e.ColumnIndex, false);
+            // จำช่องที่ผู้ใช้เลือก (คลิก / ลูกศร) — คลิกหัวแถวไม่นับ (ไม่ให้ช่องที่ชี้ย้ายไปคอลัมน์แรก)
+            _grid.CellMouseDown += (s, e) =>
+            {
+                _hdrClick = e.ColumnIndex < 0;
+                if (e.RowIndex >= 0 && e.ColumnIndex >= 0) { _pointRow = e.RowIndex; _pointCol = e.ColumnIndex; }
+            };
+            _grid.CellMouseUp += (s, e) => _hdrClick = false;
+            _grid.CurrentCellChanged += (s, e) =>
+            {
+                if (!_hdrClick && _grid.CurrentCell is DataGridViewCell c && c.ColumnIndex >= 0) { _pointRow = c.RowIndex; _pointCol = c.ColumnIndex; }
+            };
             var cm = new ContextMenuStrip();
-            cm.Items.Add(Tr.T("คัดลอก", "Copy"), null, (s, e) => { var d = _grid.GetClipboardContent(); if (d != null) Clipboard.SetDataObject(d); });
+            cm.Items.Add(Tr.T("ดูแถวนี้… (หน้าต่าง)", "View this row… (window)"), null, (s, e) => EditCurrentRow());
+            var dbl = new ToolStripMenuItem(Tr.T("ดับเบิลคลิกที่ช่อง = เปิดหน้าต่าง", "Double-click a cell = open the window")) { CheckOnClick = true };
+            dbl.Click += (s, e) => SetDblPopup(dbl.Checked);
+            cm.Opening += (s, e) => dbl.Checked = _dblPopup;
+            cm.Items.Add(dbl);
+            cm.Items.Add(new ToolStripSeparator());
+            // คัดลอก / วาง ทั้งกลุ่ม (เลือกด้วยการลาก หรือ Shift / Ctrl + คลิก)
+            cm.Items.Add(new ToolStripMenuItem(Tr.T("คัดลอก", "Copy"), null, (s, e) => CopySelection(false)) { ShortcutKeyDisplayString = "Ctrl+C" });
+            cm.Items.Add(new ToolStripMenuItem(Tr.T("คัดลอกพร้อมหัวคอลัมน์", "Copy with headers"), null, (s, e) => CopySelection(true)) { ShortcutKeyDisplayString = "Ctrl+Shift+C" });
+            cm.Items.Add(Tr.T("คัดลอกเป็นคำสั่ง SQL INSERT", "Copy as SQL INSERT"), null, (s, e) => CopyAsInsert());
+            _grid.SelectionChanged += (s, e) => ShowSelectionInfo();
+            _grid.KeyDown += (s, e) =>
+            {
+                if (_grid.IsCurrentCellInEditMode) return;
+                if (e.Control && e.Shift && e.KeyCode == Keys.C) { e.Handled = e.SuppressKeyPress = true; CopySelection(true); }
+            };
+            // กรองตามค่าในช่อง (แบบ DBeaver)
+            var fv = new ToolStripMenuItem(Tr.T("กรองตามค่านี้", "Filter by this value"));
+            fv.DropDownItems.Add("=", null, (s, e) => FilterByCell("="));
+            fv.DropDownItems.Add("<>", null, (s, e) => FilterByCell("<>"));
+            fv.DropDownItems.Add("LIKE '%…%'", null, (s, e) => FilterByCell("LIKE"));
+            fv.DropDownItems.Add("IS NULL", null, (s, e) => FilterByCell("IS NULL"));
+            fv.DropDownItems.Add("IS NOT NULL", null, (s, e) => FilterByCell("IS NOT NULL"));
+            cm.Items.Add(fv);
+            cm.Opening += (s, e) => fv.DropDown.Renderer = new Theme.Renderer();
             cm.Items.Add(new ToolStripSeparator());
             cm.Items.Add(Tr.T("เปิดดูไฟล์ / รูป (BLOB)", "Open file / image (BLOB)"), null, (s, e) => { var c = _grid.CurrentCell; if (c != null && IsBlobCol(c.ColumnIndex)) _ = OpenBlob(c.RowIndex, c.ColumnIndex); });
             cm.Items.Add(Tr.T("บันทึก BLOB เป็นไฟล์…", "Save BLOB to file…"), null, (s, e) => _ = SaveBlob());
             _grid.ContextMenuStrip = cm;
-            dl.Controls.Add(_grid, 0, 1);
-            _lblData = new Label { AutoSize = true, Margin = new Padding(0, 6, 0, 0), Tag = "keep" };
-            dl.Controls.Add(_lblData, 0, 2);
+            // ฟอนต์ที่มีทั้งตัวไทยและอังกฤษ (ฟอนต์ความกว้างคงที่ไม่มีตัวไทย Windows จะสลับฟอนต์ทั้งบรรทัด ทำให้คอลัมน์เบี้ยว)
+            _txtData = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Visible = false, MaxLength = 0, Font = Ui.Font };
+            var dataHost = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            dataHost.Controls.Add(_grid);
+            dataHost.Controls.Add(_txtData);
+            _txtData.Visible = _textMode;
+            _grid.Visible = !_textMode;
+            var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            var side = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 4, 0) };
+            side.Controls.AddRange(ModeButtons());
+            side.Controls.Add(IconBtn("", Tr.T("Record — ดูข้อมูลทีละแถว (ดับเบิลคลิกที่แถวก็ได้)", "Record — one row at a time (or double-click a row)"), EditCurrentRow));
+            foreach (Control c in side.Controls) c.Margin = new Padding(0, 0, 0, 4);
+            body.Controls.Add(side, 0, 0);
+            body.Controls.Add(dataHost, 1, 0);
+            dl.Controls.Add(body, 0, 1);
+            dl.Controls.Add(foot, 0, 2);
             _tabPanels[0] = dl;
             _gridCols = new DataGridView
             {
@@ -449,6 +593,8 @@ namespace SurapolSQL
             foreach (var (b, g) in _toolIcons) b.Image = Ui.Glyph(g, _tool.ImageScalingSize.Width, Theme.Text);
             foreach (Control c in new Control[] { _grid, _gridCols, _gGrid, _sqlGrid }) Theme.StyleGrid((DataGridView)c);
             _txtDdl.Font = Ui.Font;
+            _txtData.Font = Ui.Font;
+            StyleModeButtons();
             ThemeSqlPage();
             _grid.ContextMenuStrip!.Renderer = new Theme.Renderer();
             BuildIcons();
@@ -481,7 +627,263 @@ namespace SurapolSQL
             return b;
         }
 
-        static Label Sep() => new Label { Text = "|", AutoSize = true, Margin = new Padding(4, 7, 8, 0), Tag = "muted" };
+        static Label Sep() => new Label { Text = "|", AutoSize = true, Margin = new Padding(2, 7, 4, 0), Tag = "muted" };
+
+        /// <summary>ปุ่มไอคอนขนาดเล็ก (มีคำอธิบายเมื่อชี้เมาส์)  text = มีข้อความต่อท้ายไอคอนด้วย</summary>
+        Button IconBtn(string glyph, string tip, Action a, string tag = "", string? text = null)
+        {
+            var b = new Button { Tag = tag, Margin = new Padding(0, 1, 4, 1) };
+            if (text == null)
+            {
+                b.AutoSize = false;
+                b.Size = new Size(Ui.Px(this, 32), Ui.Px(this, 28));
+                b.ImageAlign = ContentAlignment.MiddleCenter;
+            }
+            else
+            {
+                b.Text = text;
+                b.AutoSize = true;
+                b.MinimumSize = new Size(0, Ui.Px(this, 28));
+                b.Padding = new Padding(6, 0, 8, 0);
+                b.TextImageRelation = TextImageRelation.ImageBeforeText;
+            }
+            b.Click += (s, e) => a();
+            _btnTip.SetToolTip(b, tip);
+            _iconBtns.Add((b, glyph));
+            return b;
+        }
+
+        /// <summary>วาดไอคอนของปุ่มตามสีธีม (ปุ่มหลัก = ไอคอนสีขาว, ปุ่มอันตราย = สีแดง)</summary>
+        void PaintIcons()
+        {
+            int sz = Ui.Px(this, 15);
+            foreach (var (b, g) in _iconBtns)
+            {
+                string tag = b.Tag as string ?? "";
+                b.Image = Ui.Glyph(g, sz, tag == "primary" ? Theme.AccentText : tag == "danger" ? Theme.Err : Theme.Text);
+            }
+        }
+
+        // ------------------------------------------------------------------ ตัวกรอง / เมนูหัวคอลัมน์ (แบบ DBeaver)
+
+        /// <summary>กำลังผูกข้อมูลใหม่ (ไม่ต้องอัปเดตโหมด Text ทุกครั้งที่ลำดับคอลัมน์เปลี่ยน)</summary>
+        bool _binding;
+
+        /// <summary>ดับเบิลคลิกที่ช่อง = เปิดหน้าต่างแก้ทั้งแถว (false = แก้ในช่อง — ค่าเริ่มต้น)</summary>
+        bool _dblPopup = Ui.GetSetting("dblclick_popup") == "1";
+        /// <summary>ช่องที่ผู้ใช้เลือกล่าสุด (ใช้ชี้ช่องตอนดับเบิลคลิกหัวแถว)</summary>
+        int _pointRow = -1, _pointCol = -1;
+        bool _hdrClick;
+
+        /// <summary>
+        /// ดับเบิลคลิกในตาราง:  col &lt; 0 (หัวแถว) = หน้าต่างแก้ทั้งแถวเสมอ ชี้ช่องที่เลือกอยู่ในแถวนั้น · ช่อง BLOB = เปิดดูไฟล์
+        /// ช่องอื่น = แก้ในช่อง (ค่าเริ่มต้น) หรือเปิดหน้าต่างชี้ช่องที่คลิก   show = false: เปิดแบบ modal (ปกติ)
+        /// คืนหน้าต่างที่สร้าง เมื่อ show = true (ใช้ตอนทดสอบ)
+        /// </summary>
+        RowEditForm? GridDoubleClick(int row, int col, bool modeless)
+        {
+            if (row < 0) return null;
+            int focus = col < 0 ? (_pointRow == row ? _pointCol : -1) : col;
+            if (col >= 0 && IsBlobCol(col)) { _ = OpenBlob(row, col); return null; }
+            if (col >= 0 && !_dblPopup)
+            {
+                if (!_grid.ReadOnly && !_grid.Columns[col].ReadOnly)
+                {
+                    _grid.CurrentCell = _grid[col, row];
+                    _grid.BeginEdit(true);
+                }
+                return null;
+            }
+            if (modeless) return CreateRowEditor(row, focus);
+            OpenRowEditor(row, focus);
+            return null;
+        }
+
+        void SetDblPopup(bool on)
+        {
+            _dblPopup = on;
+            Ui.SetSetting("dblclick_popup", on ? "1" : "0");
+            SetStatus(on ? Tr.T("ดับเบิลคลิกที่ช่อง = เปิดหน้าต่างแก้ทั้งแถว", "Double-click a cell = open the row window")
+                         : Tr.T("ดับเบิลคลิกที่ช่อง = แก้ในช่อง  (ดับเบิลคลิกหัวแถวซ้ายสุด = เปิดหน้าต่าง)", "Double-click a cell = edit in place  (double-click the row header = open the row window)"));
+        }
+
+        /// <summary>เมนูตั้งค่าตาราง (ปุ่ม ⚙ ท้ายตาราง)</summary>
+        void ShowGridSettings(Control at)
+        {
+            var m = new ContextMenuStrip { Renderer = new Theme.Renderer() };
+            m.Items.Add(new ToolStripMenuItem(Tr.T("ดับเบิลคลิกที่ช่อง:", "Double-click a cell:")) { Enabled = false });
+            string inPlace = Tr.T("ไม่เปิดหน้าต่าง (ค่าเริ่มต้น)", "Do not open a window (default)");
+            m.Items.Add(new ToolStripMenuItem("    " + inPlace, null, (s, e) => SetDblPopup(false)) { Checked = !_dblPopup });
+            m.Items.Add(new ToolStripMenuItem("    " + Tr.T("เปิดหน้าต่างแก้ทั้งแถว (ชี้ช่องที่คลิก)", "Open the row window (pointing at the clicked cell)"), null, (s, e) => SetDblPopup(true)) { Checked = _dblPopup });
+            m.Items.Add(new ToolStripSeparator());
+            m.Items.Add(new ToolStripMenuItem(Tr.T("ดับเบิลคลิกหัวแถว (ช่องซ้ายสุด) = เปิดหน้าต่างเสมอ", "Double-click the row header (leftmost) = always opens the window")) { Enabled = false });
+            m.Items.Add(new ToolStripMenuItem(Tr.T("ดับเบิลคลิกช่อง BLOB = เปิดดูไฟล์ / รูป", "Double-click a BLOB cell = open the file / image")) { Enabled = false });
+            m.Show(at, new Point(0, -m.PreferredSize.Height));
+        }
+
+        void ClearFilter()
+        {
+            _txtWhere.Text = "";
+            if (_where != "") _ = ApplyFilter();
+        }
+
+        /// <summary>กรองตามค่าในช่องที่เลือก: = / &lt;&gt; / LIKE / IS NULL / IS NOT NULL (ต่อท้ายตัวกรองเดิมด้วย AND)</summary>
+        void FilterByCell(string op)
+        {
+            var c = _grid.CurrentCell;
+            if (_dt == null || c == null || c.ColumnIndex >= _cols.Count) return;
+            var cm = _cols[c.ColumnIndex];
+            object? v = RowAt(c.RowIndex)?[c.ColumnIndex];
+            if (v is BlobRef || v is byte[]) { Ui.Info(this, Tr.T("กรองด้วยค่า BLOB ไม่ได้", "Cannot filter on a BLOB value")); return; }
+            string lit = v is null or DBNull ? "NULL" : IsNumType(cm.DataType) ? Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "" : LiveValue.Quote(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "");
+            string cond = op switch
+            {
+                "IS NULL" or "IS NOT NULL" => Q(cm.Name) + " " + op,
+                "LIKE" => Q(cm.Name) + " LIKE " + LiveValue.Quote("%" + (v is null or DBNull ? "" : Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture)) + "%"),
+                _ when lit == "NULL" => Q(cm.Name) + (op == "=" ? " IS NULL" : " IS NOT NULL"),
+                _ => Q(cm.Name) + " " + op + " " + lit,
+            };
+            string cur = _txtWhere.Text.Trim();
+            _txtWhere.Text = cur == "" ? cond : "(" + cur + ") AND " + cond;
+            _ = ApplyFilter();
+        }
+
+        /// <summary>คลิกขวาที่หัวคอลัมน์: เรียง · ซ่อน / แสดงคอลัมน์ · ปรับความกว้าง · คืนลำดับเดิม · คัดลอกชื่อ</summary>
+        void ShowHeaderMenu(int col)
+        {
+            if (col < 0 || col >= _grid.Columns.Count || col >= _cols.Count) return;
+            var gc = _grid.Columns[col];
+            string name = _cols[col].Name;
+            var m = new ContextMenuStrip { Renderer = new Theme.Renderer() };
+            m.Items.Add(Tr.T("เรียงน้อย → มาก", "Sort ascending"), null, (s, e) => _ = SortExplicit(name, false));
+            m.Items.Add(Tr.T("เรียงมาก → น้อย", "Sort descending"), null, (s, e) => _ = SortExplicit(name, true));
+            if (_orderCol != null) m.Items.Add(Tr.T("ไม่เรียง", "Remove sorting"), null, (s, e) => _ = SortExplicit(null, false));
+            m.Items.Add(new ToolStripSeparator());
+            var hide = m.Items.Add(Tr.T($"ซ่อนคอลัมน์ \"{name}\"", $"Hide column \"{name}\""), null, (s, e) => { gc.Visible = false; ColumnsChanged(); });
+            hide.Enabled = _grid.Columns.Cast<DataGridViewColumn>().Count(x => x.Visible) > 1;
+            var pick = new ToolStripMenuItem(Tr.T("เลือกคอลัมน์ที่แสดง", "Choose visible columns"));
+            pick.DropDown.Renderer = new Theme.Renderer();
+            foreach (var x in _grid.Columns.Cast<DataGridViewColumn>().OrderBy(x => x.DisplayIndex))
+            {
+                var it = new ToolStripMenuItem(x.Index < _cols.Count ? _cols[x.Index].Name : x.HeaderText) { Checked = x.Visible, CheckOnClick = true };
+                var cx = x;
+                it.CheckedChanged += (s, e) =>
+                {
+                    if (!it.Checked && _grid.Columns.Cast<DataGridViewColumn>().Count(y => y.Visible) <= 1) { it.Checked = true; return; }
+                    cx.Visible = it.Checked;
+                    ColumnsChanged();
+                };
+                pick.DropDownItems.Add(it);
+            }
+            pick.DropDown.Closing += (s, e) => { if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked) e.Cancel = true; };
+            m.Items.Add(pick);
+            m.Items.Add(Tr.T("แสดงทุกคอลัมน์", "Show all columns"), null, (s, e) => { foreach (DataGridViewColumn x in _grid.Columns) x.Visible = true; ColumnsChanged(); });
+            m.Items.Add(new ToolStripSeparator());
+            m.Items.Add(Tr.T("ปรับความกว้างพอดี", "Fit width"), null, (s, e) => _grid.AutoResizeColumn(col, DataGridViewAutoSizeColumnMode.AllCells));
+            m.Items.Add(Tr.T("ปรับทุกคอลัมน์พอดี", "Fit all columns"), null, (s, e) =>
+            {
+                _grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.AllCells);
+                foreach (DataGridViewColumn x in _grid.Columns) if (x.Width > Ui.Px(this, 420)) x.Width = Ui.Px(this, 420);
+            });
+            m.Items.Add(Tr.T("คืนลำดับ / ความกว้างเดิม", "Reset order / widths"), null, (s, e) =>
+            {
+                _layoutKey = "";
+                for (int i = 0; i < _grid.Columns.Count; i++) { _grid.Columns[i].DisplayIndex = i; _grid.Columns[i].Visible = true; }
+                _grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.DisplayedCells);
+                TypedHeaders(_grid, i => i < _cols.Count ? (_cols[i].Name, _cols[i].ColumnType, _cols[i].Key == "PRI") : ("", "", false));
+                ColumnsChanged();
+            });
+            m.Items.Add(new ToolStripSeparator());
+            m.Items.Add(Tr.T("คัดลอกชื่อคอลัมน์", "Copy column name"), null, (s, e) => Clipboard.SetText(name));
+            var at = _grid.PointToClient(Cursor.Position);
+            m.Show(_grid, at);
+        }
+
+        void ColumnsChanged()
+        {
+            int hidden = _grid.Columns.Cast<DataGridViewColumn>().Count(x => !x.Visible);
+            if (hidden > 0) SetStatus(Tr.T($"ซ่อน {hidden:N0} คอลัมน์ (คลิกขวาที่หัวคอลัมน์ → แสดงทุกคอลัมน์)", $"{hidden:N0} column(s) hidden (right-click a header → Show all columns)"));
+            if (_textMode) RefreshTextView();
+        }
+
+        /// <summary>ปุ่มสลับมุมมอง Grid / Text (มีทั้งหน้าตารางและหน้าผลลัพธ์ SQL ใช้ค่าเดียวกัน)</summary>
+        Control[] ModeButtons()
+        {
+            var g = IconBtn("", Tr.T("ดูแบบตาราง (Grid)", "Grid view"), () => SetTextMode(false));
+            var t = IconBtn("", Tr.T("ดูแบบข้อความ (Text) — คัดลอกไปวางได้ทันที", "Text view — easy to copy & paste"), () => SetTextMode(true));
+            g.Margin = new Padding(0, 1, 0, 1);
+            _modeBtns.Add((g, false));
+            _modeBtns.Add((t, true));
+            return new Control[] { g, t };
+        }
+
+        // ------------------------------------------------------------------ หัวคอลัมน์ 2 บรรทัด (ชื่อ + ชนิด แบบ pgAdmin)
+
+        Font? _hdrBold, _hdrSmall;
+
+        /// <summary>ตั้งความสูงหัวตาราง และขยายคอลัมน์ให้พอกับชื่อ / ชนิด</summary>
+        void TypedHeaders(DataGridView g, Func<int, (string Name, string Type, bool Key)> info)
+        {
+            _hdrBold ??= new Font(Ui.Font, FontStyle.Bold);
+            _hdrSmall ??= new Font(Ui.Font.FontFamily, Ui.Font.Size - 1.25f);
+            g.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+            g.ColumnHeadersHeight = Ui.Px(this, 44);
+            for (int i = 0; i < g.Columns.Count; i++)
+            {
+                var (name, type, key) = info(i);
+                int w = Math.Max(TextRenderer.MeasureText(name, _hdrBold).Width, TextRenderer.MeasureText((key ? "[PK] " : "") + type, _hdrSmall).Width) + Ui.Px(this, 26);
+                if (g.Columns[i].Width < w) g.Columns[i].Width = Math.Min(w, Ui.Px(this, 320));
+            }
+        }
+
+        /// <summary>วาดหัวคอลัมน์: ชื่อ (ตัวหนา) บรรทัดบน, ชนิด (สีจาง) บรรทัดล่าง, ลูกศรเรียงทางขวา</summary>
+        void PaintTypedHeader(DataGridView g, DataGridViewCellPaintingEventArgs e, string name, string type, bool key)
+        {
+            _hdrBold ??= new Font(Ui.Font, FontStyle.Bold);
+            _hdrSmall ??= new Font(Ui.Font.FontFamily, Ui.Font.Size - 1.25f);
+            var gr = e.Graphics;
+            if (gr == null) return;
+            e.PaintBackground(e.ClipBounds, false);
+            var b = e.CellBounds;
+            int pad = Ui.Px(this, 6), mid = b.Top + b.Height / 2;
+            var sort = g.Columns[e.ColumnIndex].HeaderCell.SortGlyphDirection;
+            int right = b.Right - pad - (sort != SortOrder.None ? Ui.Px(this, 12) : 0);
+            const TextFormatFlags f = TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(gr, name, _hdrBold, new Rectangle(b.Left + pad, b.Top + Ui.Px(this, 4), right - b.Left - pad, mid - b.Top), Theme.Text, f | TextFormatFlags.Bottom);
+            if (key)
+            {
+                const TextFormatFlags fk = TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.Top;
+                int kw = TextRenderer.MeasureText(gr, "[PK]", _hdrSmall, Size.Empty, fk).Width + Ui.Px(this, 4);
+                TextRenderer.DrawText(gr, "[PK]", _hdrSmall, new Rectangle(b.Left + pad, mid + Ui.Px(this, 1), kw + Ui.Px(this, 2), b.Bottom - mid), Theme.IconDb, fk);
+                TextRenderer.DrawText(gr, type, _hdrSmall, new Rectangle(b.Left + pad + kw, mid + Ui.Px(this, 1), right - b.Left - pad - kw, b.Bottom - mid), Theme.Muted, f | TextFormatFlags.Top);
+            }
+            else TextRenderer.DrawText(gr, type, _hdrSmall, new Rectangle(b.Left + pad, mid + Ui.Px(this, 1), right - b.Left - pad, b.Bottom - mid), Theme.Muted, f | TextFormatFlags.Top);
+            if (sort != SortOrder.None)
+                TextRenderer.DrawText(gr, sort == SortOrder.Ascending ? "▲" : "▼", _hdrSmall, new Rectangle(right, b.Top, b.Right - right - Ui.Px(this, 2), b.Height), Theme.Link, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding);
+            e.Handled = true;
+        }
+
+
+        void StyleModeButtons()
+        {
+            foreach (var (b, text) in _modeBtns)
+            {
+                b.Tag = text == _textMode ? "primary" : "";
+                Theme.Apply(b);
+            }
+            PaintIcons();
+        }
+
+        void SetTextMode(bool on)
+        {
+            _textMode = on;
+            Ui.SetSetting("text_mode", on ? "1" : "0");
+            StyleModeButtons();
+            if (on) { _grid.EndEdit(); RefreshTextView(); }
+            _txtData.Visible = on;
+            _grid.Visible = !on;
+            if (_sqlTab >= 0) ShowSqlTab(_sqlTab);
+        }
 
         void SetStatus(string? s) => _status.Text = s ?? "";
 
@@ -817,20 +1219,34 @@ namespace SurapolSQL
         void FilterList()
         {
             if (_lvAll.Count == 0 || _curPage != _listPage) return;
-            string q = _txtFind.Text.Trim();
-            var show = q == "" ? _lvAll : _lvAll.Where(i => i.Text.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+            // ช่องค้นหาในหน้า (ชื่อ หรือคอลัมน์อื่น เช่น คำอธิบาย) และช่องค้นหาทางซ้าย (ชื่อ)
+            string q = _lvFind.Text.Trim(), q2 = _txtFind.Text.Trim();
+            bool Hit(ListViewItem i) =>
+                (q == "" || i.SubItems.Cast<ListViewItem.ListViewSubItem>().Any(s => s.Text.Contains(q, StringComparison.OrdinalIgnoreCase))) &&
+                (q2 == "" || i.Text.Contains(q2, StringComparison.OrdinalIgnoreCase));
+            var show = q == "" && q2 == "" ? _lvAll : _lvAll.Where(Hit).ToList();
             _lv.BeginUpdate();
             _lv.Items.Clear();
             _lv.Items.AddRange(show.ToArray());
             ApplyListSort();
             _lv.EndUpdate();
+            if (q != "") SetStatus(Tr.T($"ค้นหา \"{q}\": พบ {show.Count:N0} จาก {_lvAll.Count:N0} รายการ   (Enter = เปิดรายการแรก)", $"Search \"{q}\": {show.Count:N0} of {_lvAll.Count:N0}   (Enter = open the first one)"));
         }
 
         /// <summary>เก็บรายการเต็มของ ListView ไว้กรอง / เรียง แล้วกรองตามคำค้นปัจจุบัน</summary>
         void ListLoaded()
         {
             _lvAll = _lv.Items.Cast<ListViewItem>().ToList();
-            if (_txtFind.Text.Trim() != "") FilterList();
+            if (_txtFind.Text.Trim() != "" || _lvFind.Text.Trim() != "") FilterList();
+        }
+
+        /// <summary>ใส่ช่องค้นหาไว้หน้าสุดของแถบปุ่ม (เริ่มว่างทุกครั้งที่เปลี่ยนหน้า)</summary>
+        void AddSearch(string placeholder)
+        {
+            _lvFind.Text = "";
+            _lvFind.PlaceholderText = "🔍  " + placeholder;
+            _actions.Controls.Add(_lvFind);
+            Theme.Apply(_lvFind);
         }
 
         // ------------------------------------------------------------------ เรียงรายการ (คลิกหัวคอลัมน์)
@@ -1137,8 +1553,9 @@ namespace SurapolSQL
             ShowList(sc.Display, $"{sc.User}@{sc.Host}:{sc.Port}", "conn");
             var c = Conn(sc);
             if (c == null) return;
-            AddAction(Btn(Tr.T("เปิดฐานข้อมูล", "Open database"), OpenListItem, "primary"));
-            AddAction(Btn("SQL Editor", () => OpenSqlEditor(new NodeInfo { Kind = NodeKind.Conn, Conn = sc })));
+            // สร้าง / ลบฐานข้อมูล · Backup · Restore · SQL Editor อยู่บนแถบเครื่องมือด้านบนแล้ว (ใช้กับรายการที่เลือกในหน้านี้)
+            AddSearch(Tr.T("ค้นหาฐานข้อมูล…", "Search databases…"));
+            AddAction(Btn(Tr.T("เปิด", "Open"), OpenListItem, "primary"));
             _lv.Columns.Add(Tr.T("ฐานข้อมูล", "Database Name"), Ui.Px(this, 240));
             _lv.Columns.Add("Default Charset", Ui.Px(this, 130));
             _lv.Columns.Add("Default Collation", Ui.Px(this, 200));
@@ -1185,8 +1602,9 @@ namespace SurapolSQL
             ShowList(db, Tr.T("ฐานข้อมูล", "Database") + "  ·  " + sc.Display, "db");
             var c = Conn(sc);
             if (c == null) return;
-            AddAction(Btn(Tr.T("เปิดตาราง", "Open table"), OpenListItem));
-            AddAction(Btn("SQL Editor", () => OpenSqlEditor(new NodeInfo { Kind = NodeKind.Db, Conn = sc, Db = db })));
+            // SQL Editor · Restore · ลบฐานข้อมูล อยู่บนแถบเครื่องมือด้านบนแล้ว
+            AddSearch(Tr.T("ค้นหาตาราง…", "Search tables…"));
+            AddAction(Btn(Tr.T("เปิดตาราง", "Open table"), OpenListItem, "primary"));
             _lv.Columns.Add(Tr.T("ตาราง", "Table"), Ui.Px(this, 240));
             _lv.Columns.Add(Tr.T("ชนิด", "Type"), Ui.Px(this, 70));
             _lv.Columns.Add("Engine", Ui.Px(this, 80));

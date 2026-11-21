@@ -29,6 +29,8 @@ namespace SurapolSQL
         TextBox _sqlEdit = null!, _sqlMsg = null!;
         SplitContainer _sqlSplit = null!;
         DataGridView _sqlGrid = null!;
+        /// <summary>ผลลัพธ์แบบข้อความ (โหมด Text)</summary>
+        TextBox _sqlText = null!;
         FlowLayoutPanel _sqlTabs = null!;
         Label _sqlInfo = null!;
         Button _sqlRun = null!, _sqlRunAll = null!, _sqlStop = null!;
@@ -140,15 +142,31 @@ namespace SurapolSQL
                 else if (e.Value is string str && str.Length > 500) { e.Value = Ui.DisplayValue(str, 500); e.FormattingApplied = true; }
             };
             _sqlGrid.DataError += (s, e) => e.ThrowException = false;
+            _sqlGrid.CellPainting += (s, e) =>
+            {
+                if (e.RowIndex != -1 || e.ColumnIndex < 0 || _sqlGrid.DataSource is not DataTable st || e.ColumnIndex >= _sqlGrid.Columns.Count) return;
+                var dc = st.Columns[_sqlGrid.Columns[e.ColumnIndex].DataPropertyName];
+                if (dc != null) PaintTypedHeader(_sqlGrid, e, dc.Caption, dc.ExtendedProperties["type"] as string ?? "", false);
+            };
             var cm = new ContextMenuStrip { Renderer = new Theme.Renderer() };
             cm.Items.Add(Tr.T("คัดลอก", "Copy"), null, (s, e) => CopyGrid(false));
             cm.Items.Add(Tr.T("คัดลอกพร้อมหัวคอลัมน์", "Copy with headers"), null, (s, e) => CopyGrid(true));
             _sqlGrid.ContextMenuStrip = cm;
             _sqlMsg = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = Ui.Mono };
+            _sqlText = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Visible = false, MaxLength = 0, Font = Ui.Font };
             host.Controls.Add(_sqlGrid);
             host.Controls.Add(_sqlMsg);
+            host.Controls.Add(_sqlText);
             _sqlInfo = new Label { AutoSize = true, Tag = "muted", Margin = new Padding(0, 6, 0, 0) };
-            res.Controls.Add(_sqlTabs, 0, 0);
+            // แท็บผลลัพธ์ทางซ้าย, ปุ่มสลับ Grid / Text ทางขวา
+            var resTop = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0) };
+            resTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            resTop.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            var modes = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(8, 5, 0, 5) };
+            modes.Controls.AddRange(ModeButtons());
+            resTop.Controls.Add(_sqlTabs, 0, 0);
+            resTop.Controls.Add(modes, 1, 0);
+            res.Controls.Add(resTop, 0, 0);
             res.Controls.Add(host, 0, 1);
             res.Controls.Add(_sqlInfo, 0, 2);
 
@@ -173,6 +191,7 @@ namespace SurapolSQL
         {
             _sqlEdit.Font = Ui.Mono;
             _sqlMsg.Font = Ui.Mono;
+            _sqlText.Font = Ui.Font;
             _sqlGrid.ContextMenuStrip!.Renderer = new Theme.Renderer();
             StyleSqlTabs();
             StyleStopButton();
@@ -610,13 +629,15 @@ namespace SurapolSQL
             var log = new StringBuilder();
             bool failed = false, stopped = false, ddl = false;
             int done = 0;
+            long affSum = 0;
+            string errMsg = "";
             var total = Stopwatch.StartNew();
             string Sec(Stopwatch sw) => sw.Elapsed.TotalSeconds.ToString("0.000") + Tr.T(" วินาที", " s");
             await Task.Run(() =>
             {
                 MySqlConnection conn;
                 try { conn = LiveValue.Open(c, db == "" ? null : db); }
-                catch (Exception ex) { log.AppendLine("✖ " + Err(ex)); failed = true; return; }
+                catch (Exception ex) { log.AppendLine("✖ " + Err(ex)); errMsg = Err(ex); failed = true; return; }
                 using (conn)
                 {
                     for (int k = 0; k < stmts.Count; k++)
@@ -646,6 +667,7 @@ namespace SurapolSQL
                                     if (more) { trunc = true; try { cmd.Cancel(); } catch { } break; }
                                 } while (reader.NextResult());
                                 if (!trunc) affected = reader.RecordsAffected;
+                                if (affected > 0) affSum += affected;
                             }
                             finally
                             {
@@ -669,6 +691,7 @@ namespace SurapolSQL
                         catch (Exception ex)
                         {
                             failed = true;
+                            errMsg = Tr.T($"คำสั่งที่ {k + 1}: ", $"Statement {k + 1}: ") + Err(ex);
                             log.AppendLine(head).Append("    ✖ ").AppendLine(Err(ex));
                             break;
                         }
@@ -723,6 +746,8 @@ namespace SurapolSQL
                 col.Caption = name;
                 try { num[i] = IsNumericType(r.GetFieldType(i)); } catch { }
                 col.ExtendedProperties["num"] = num[i];
+                // ชนิดของคอลัมน์ (แสดงใต้ชื่อในหัวตาราง แบบ pgAdmin)
+                try { col.ExtendedProperties["type"] = r.GetDataTypeName(i).ToLowerInvariant(); } catch { }
             }
             int rows = 0;
             t.BeginLoadData();
@@ -803,12 +828,25 @@ namespace SurapolSQL
             if (k < 0)
             {
                 _sqlGrid.Visible = false;
+                _sqlText.Visible = false;
                 _sqlMsg.Visible = true;
                 _sqlInfo.Text = _sqlResults.Count == 0 ? Tr.T("ยังไม่มีผลลัพธ์แบบตาราง", "No result sets") : Tr.T($"{_sqlResults.Count:N0} ผลลัพธ์", $"{_sqlResults.Count:N0} result set(s)");
                 return;
             }
             var r = _sqlResults[k];
             _sqlMsg.Visible = false;
+            string info = Tr.T($"{r.Table.Rows.Count:N0} แถว  ·  {r.Table.Columns.Count:N0} คอลัมน์", $"{r.Table.Rows.Count:N0} rows  ·  {r.Table.Columns.Count:N0} columns") +
+                          (r.Truncated ? Tr.T($"  ·  ⚠ แสดงแค่ {r.Max:N0} แถวแรก", $"  ·  ⚠ first {r.Max:N0} rows only") : "");
+            if (_textMode)
+            {
+                _sqlGrid.Visible = false;
+                _sqlText.Visible = true;
+                _sqlText.Text = TextGrid.Format(r.Table, c => r.Table.Columns[c].ExtendedProperties["num"] is true,
+                    v => v is null or DBNull ? "NULL" : Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "", _sqlText.Font);
+                _sqlInfo.Text = info + Tr.T("  ·  โหมดข้อความ (Ctrl+A แล้ว Ctrl+C เพื่อคัดลอก)", "  ·  text view (Ctrl+A, Ctrl+C to copy)");
+                return;
+            }
+            _sqlText.Visible = false;
             _sqlGrid.Visible = true;
             _sqlGrid.DataSource = null;
             _sqlGrid.Columns.Clear();
@@ -823,14 +861,13 @@ namespace SurapolSQL
                 gc.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
             }
             _sqlGrid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.DisplayedCells);
+            TypedHeaders(_sqlGrid, i => { var dc = r.Table.Columns[_sqlGrid.Columns[i].DataPropertyName]; return (dc?.Caption ?? "", dc?.ExtendedProperties["type"] as string ?? "", false); });
             foreach (DataGridViewColumn gc in _sqlGrid.Columns)
             {
                 if (gc.Width > Ui.Px(this, 420)) gc.Width = Ui.Px(this, 420);
                 if (gc.Width < Ui.Px(this, 60)) gc.Width = Ui.Px(this, 60);
             }
-            _sqlInfo.Text = Tr.T($"{r.Table.Rows.Count:N0} แถว  ·  {r.Table.Columns.Count:N0} คอลัมน์", $"{r.Table.Rows.Count:N0} rows  ·  {r.Table.Columns.Count:N0} columns") +
-                            (r.Truncated ? Tr.T($"  ·  ⚠ แสดงแค่ {r.Max:N0} แถวแรก", $"  ·  ⚠ first {r.Max:N0} rows only") : "") +
-                            Tr.T("  ·  คลิกหัวคอลัมน์เพื่อเรียง", "  ·  click a header to sort");
+            _sqlInfo.Text = info + Tr.T("  ·  คลิกหัวคอลัมน์เพื่อเรียง", "  ·  click a header to sort");
         }
 
         void CopyGrid(bool headers)
